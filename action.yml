@@ -15,10 +15,32 @@ inputs:
     default: "."
   fail-on:
     description: >-
-      Fail the job when a finding at this severity or worse is present:
-      none, critical, high, medium, low, info.
+      What fails the job. A selector gates on the kind of cryptography: "hndl"
+      for key establishment, "posture=broken,vulnerable", "primitive=key-agree,kem",
+      "algorithm=RSA", "kind=call", "language=java". Terms in one line must all
+      match; put alternatives on separate lines. Crypto-View no longer reports a
+      critical/high/medium/low rating, but a workflow written against one still
+      works.
     required: false
     default: "none"
+  policy:
+    description: >-
+      Path to a policy file holding named gates, for rules worth reviewing in
+      a pull request.
+    required: false
+    default: ""
+  custom-rules:
+    description: >-
+      Path to this project's own declared cryptographic functions. Defaults to
+      crypto-view.custom.json in the scanned directory when present.
+    required: false
+    default: ""
+  baseline:
+    description: >-
+      Path to a baseline file. Only findings absent from it can fail the job,
+      so existing debt does not block a pipeline on day one.
+    required: false
+    default: ""
   include:
     description: Newline-separated globs; only paths matching are scanned.
     required: false
@@ -28,7 +50,9 @@ inputs:
     required: false
     default: ""
   sarif:
-    description: Where to write SARIF. Set upload-sarif false to keep it as an artifact only.
+    description: >-
+      Where to write SARIF 2.1.0. Set upload-sarif false to keep it as an
+      artifact only, or set this to "" to write none at all.
     required: false
     default: "crypto-view.sarif"
   upload-sarif:
@@ -66,9 +90,6 @@ inputs:
     default: "latest"
 
 outputs:
-  score:
-    description: Readiness score out of 100.
-    value: ${{ steps.scan.outputs.score }}
   findings:
     description: Total number of findings.
     value: ${{ steps.scan.outputs.findings }}
@@ -79,7 +100,7 @@ outputs:
     description: Findings that are key establishment, so exposed retrospectively.
     value: ${{ steps.scan.outputs.hndl }}
   sarif:
-    description: Path to the SARIF file.
+    description: Path to the SARIF file, if one was written.
     value: ${{ steps.scan.outputs.sarif }}
   cbom:
     description: Path to the CBOM, if one was requested.
@@ -103,6 +124,11 @@ runs:
         target="$RUNNER_TEMP/crypto-view"
         mkdir -p "$target"
 
+        # --- local-path branch: the ONE part of this file that differs between
+        # --- QComplyAG/crypto-view-action and QComplyAG/crypto-view. Everything
+        # --- outside these markers is identical in both, and
+        # --- crypto-view/tests/test_action_definition.py enforces that.
+        #
         # github.action_repository is empty when the action is referenced as a
         # local path (uses: ./). This repository carries the action definition
         # only - the engine arrives as a release asset - so there is nothing to
@@ -112,6 +138,7 @@ runs:
           echo "::error::Reference this action by tag (uses: QComplyAG/crypto-view-action@v1), not by path. This repository contains the action definition only; the scanner is downloaded from its releases."
           exit 2
         fi
+        # --- end local-path branch ---
 
         if [ "$VERSION" = "latest" ]; then
           tag=$(gh release view --repo "$ACTION_REPOSITORY" --json tagName -q .tagName)
@@ -142,15 +169,29 @@ runs:
         NO_SNIPPETS: ${{ inputs.no-snippets }}
         JOB_SUMMARY: ${{ inputs.job-summary }}
         FAIL_ON: ${{ inputs.fail-on }}
+        POLICY: ${{ inputs.policy }}
+        CUSTOM_RULES: ${{ inputs.custom-rules }}
+        BASELINE: ${{ inputs.baseline }}
       run: |
         set -uo pipefail
         crypto_view="$CRYPTO_VIEW_CMD"
         metrics="$RUNNER_TEMP/metrics.cbom.json"
 
-        args=("$SCAN_PATH" --no-color --quiet --sarif "$SARIF" --json "$metrics")
+        args=("$SCAN_PATH" --no-color --quiet --json "$metrics")
+        # Only when one was asked for. `sarif: ""` used to reach the scanner as
+        # `--sarif ""`, which writes nothing and then fails the upload step on a
+        # path that does not exist.
+        [ -n "$SARIF" ] && args+=(--sarif "$SARIF")
         [ "$NO_SNIPPETS" = "true" ] && args+=(--no-snippets)
         [ "$JOB_SUMMARY" = "true" ] && args+=(--markdown "$RUNNER_TEMP/summary.md")
-        [ "$FAIL_ON" != "none" ] && args+=(--fail-on "$FAIL_ON")
+        # Each line of fail-on is one alternative; terms within a line all
+        # have to match. A bare severity from a pre-5.7.0 workflow still works.
+        while IFS= read -r selector; do
+          [ -n "$selector" ] && [ "$selector" != "none" ] && args+=(--fail-on "$selector")
+        done <<< "$FAIL_ON"
+        [ -n "$POLICY" ] && args+=(--policy "$POLICY")
+        [ -n "$CUSTOM_RULES" ] && args+=(--custom-rules "$CUSTOM_RULES")
+        [ -n "$BASELINE" ] && args+=(--baseline "$BASELINE")
         while IFS= read -r glob; do
           [ -n "$glob" ] && args+=(--include "$glob")
         done <<< "$INCLUDE"
@@ -187,10 +228,14 @@ runs:
             document = json.load(handle)
         properties = {p["name"].split(":")[-1]: p["value"]
                       for p in document["metadata"].get("properties", [])}
-        for name, key in (("score", "readinessScore"), ("findings", "findingsTotal"),
+        for name, key in (("findings", "findingsTotal"),
                           ("actionable", "actionableTotal"), ("hndl", "hndlCount")):
             print(f"{name}={properties.get(key, '0')}")
-        print(f"sarif={os.environ['SARIF']}")
+        # The path only if a file is actually there. It was printed
+        # unconditionally, so the output was a claim about a path rather than a
+        # produced artifact, and a consumer had no way to tell the difference.
+        sarif = os.environ.get("SARIF", "")
+        print(f"sarif={sarif if sarif and os.path.exists(sarif) else ''}")
         print(f"cbom={os.environ.get('CBOM', '')}")
         PY
 
@@ -199,15 +244,18 @@ runs:
           exit 1
         fi
         if [ "$status" -eq 1 ]; then
-          echo "::error::findings at or above '$FAIL_ON'"
+          # The scanner already printed which gate tripped and why, on stderr.
+          echo "::error::Crypto-View policy failed - see the log above for the gate that tripped"
           exit 1
         fi
 
     # `always()` so the findings still reach the Security tab on a run the gate
     # failed. A gate that hides the evidence for the failure helps nobody.
     - name: Upload SARIF
-      if: ${{ inputs.upload-sarif == 'true' && always() }}
+      if: ${{ inputs.upload-sarif == 'true' && always() && steps.scan.outputs.sarif != '' }}
       uses: github/codeql-action/upload-sarif@v3
       with:
-        sarif_file: ${{ inputs.sarif }}
+        # The verified output, not the input: it is empty unless a file was
+        # actually written, which is what the `if:` above keys on.
+        sarif_file: ${{ steps.scan.outputs.sarif }}
         category: crypto-view
