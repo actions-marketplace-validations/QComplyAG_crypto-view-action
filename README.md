@@ -163,6 +163,8 @@ Use `custom-rules:` to point at a different path.
 | `custom-rules` | | Path to declared functions |
 | `baseline` | | Only fail on findings absent from this file |
 | `include` / `exclude` | | Newline-separated globs |
+| `include-tests` | `false` | Also scan test, fixture and example files (skipped by default since 5.14.0) |
+| `include-comments` | `false` | Also report algorithms named only in comments and documentation |
 | `sarif` | `crypto-view.sarif` | Where to write SARIF |
 | `upload-sarif` | `true` | Upload to code scanning |
 | `job-summary` | `true` | Write the inventory to the run summary |
