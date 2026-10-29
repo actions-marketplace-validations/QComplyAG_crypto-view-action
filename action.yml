@@ -49,6 +49,18 @@ inputs:
     description: Newline-separated globs to skip.
     required: false
     default: ""
+  include-tests:
+    description: >-
+      Also scan test, fixture and example files. Since 5.14.0 they are skipped
+      by default, and the summary says how many were.
+    required: false
+    default: "false"
+  include-comments:
+    description: >-
+      Also report algorithms named only in comments, docstrings and
+      documentation, each marked as such.
+    required: false
+    default: "false"
   sarif:
     description: >-
       Where to write SARIF 2.1.0. Set upload-sarif false to keep it as an
@@ -166,6 +178,8 @@ runs:
         CBOM: ${{ inputs.cbom }}
         INCLUDE: ${{ inputs.include }}
         EXCLUDE: ${{ inputs.exclude }}
+        INCLUDE_TESTS: ${{ inputs.include-tests }}
+        INCLUDE_COMMENTS: ${{ inputs.include-comments }}
         NO_SNIPPETS: ${{ inputs.no-snippets }}
         JOB_SUMMARY: ${{ inputs.job-summary }}
         FAIL_ON: ${{ inputs.fail-on }}
@@ -198,6 +212,10 @@ runs:
         while IFS= read -r glob; do
           [ -n "$glob" ] && args+=(--exclude "$glob")
         done <<< "$EXCLUDE"
+        # Passed only when asked for, so a workflow pinned to a release older
+        # than 5.14.0 keeps working.
+        [ "$INCLUDE_TESTS" = "true" ] && args+=(--include-tests)
+        [ "$INCLUDE_COMMENTS" = "true" ] && args+=(--include-comments)
 
         # One scan, and the exit code carries the whole outcome:
         #   0  clean            2  the scan could not run
